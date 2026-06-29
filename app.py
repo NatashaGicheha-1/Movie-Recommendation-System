@@ -9,6 +9,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 DATA_PATH = Path("MovieLens_Dataset") / "movies.csv"
 LINKS_PATH = Path("MovieLens_Dataset") / "links.csv"
+RATINGS_PATH = Path("MovieLens_Dataset") / "ratings.csv"
 POSTER_CDN = "https://images.metahub.space/poster/medium/{imdb_id}/img"
 
 GENRE_COLORS = {
@@ -66,6 +67,21 @@ def build_genre_features(movies: pd.DataFrame) -> pd.DataFrame:
     return movies["genres"].str.get_dummies(sep="|")
 
 
+@st.cache_data
+def load_ratings() -> pd.DataFrame:
+    return pd.read_csv(RATINGS_PATH, usecols=["userId", "movieId", "rating"])
+
+
+@st.cache_data
+def build_user_movie_matrix(ratings: pd.DataFrame) -> pd.DataFrame:
+    return ratings.pivot_table(
+        index="userId",
+        columns="movieId",
+        values="rating",
+        fill_value=0,
+    )
+
+
 def recommend_movies(
     movie_title: str,
     movies: pd.DataFrame,
@@ -98,6 +114,90 @@ def recommend_movies(
         .reset_index()
     )
     recommendations.insert(1, "similarity", [round(score * 100, 1) for score in scores])
+    recommendations["score_label"] = recommendations["similarity"].map(
+        lambda score: f"{score}% match"
+    )
+    return recommendations
+
+
+def recommend_user_based_movies(
+    user_id: int,
+    ratings: pd.DataFrame,
+    movies: pd.DataFrame,
+    user_movie_matrix: pd.DataFrame,
+    number_of_movies: int,
+    genre_filter: str = "All",
+    neighbor_count: int = 30,
+) -> pd.DataFrame:
+    if user_id not in user_movie_matrix.index:
+        return pd.DataFrame()
+
+    user_vector = user_movie_matrix.loc[[user_id]]
+    similarity_scores = cosine_similarity(user_vector, user_movie_matrix).ravel()
+    similar_users = pd.Series(
+        similarity_scores,
+        index=user_movie_matrix.index,
+        name="user_similarity",
+    ).drop(index=user_id, errors="ignore")
+    similar_users = similar_users[similar_users > 0].sort_values(ascending=False).head(
+        neighbor_count
+    )
+
+    if similar_users.empty:
+        return pd.DataFrame()
+
+    neighbor_ratings = user_movie_matrix.loc[similar_users.index]
+    weighted_scores = neighbor_ratings.T.dot(similar_users)
+    similarity_weight = neighbor_ratings.gt(0).T.dot(similar_users)
+    rated_by_neighbors = similarity_weight[similarity_weight > 0]
+    if rated_by_neighbors.empty:
+        return pd.DataFrame()
+
+    predicted_ratings = (
+        weighted_scores.loc[rated_by_neighbors.index] / rated_by_neighbors
+    ).dropna()
+
+    watched_movie_ids = ratings.loc[ratings["userId"] == user_id, "movieId"]
+    predicted_ratings = predicted_ratings.drop(index=watched_movie_ids, errors="ignore")
+    predicted_ratings = predicted_ratings[predicted_ratings > 0]
+
+    movie_lookup = movies.set_index("movieId")
+    if genre_filter != "All":
+        eligible_movie_ids = movie_lookup[
+            movie_lookup["genre_list"].apply(lambda genres: genre_filter in genres)
+        ].index
+        predicted_ratings = predicted_ratings.loc[
+            predicted_ratings.index.intersection(eligible_movie_ids)
+        ]
+
+    predicted_ratings = predicted_ratings.sort_values(ascending=False).head(
+        number_of_movies
+    )
+    if predicted_ratings.empty:
+        return pd.DataFrame()
+
+    recommendations = (
+        movie_lookup.loc[
+            predicted_ratings.index,
+            [
+                "display_title",
+                "year",
+                "primary_genre",
+                "clean_genres",
+                "imdb_id",
+            ],
+        ]
+        .reset_index()
+        .rename(columns={"index": "movieId"})
+    )
+    recommendations.insert(
+        1,
+        "similarity",
+        [round(float(score), 2) for score in predicted_ratings],
+    )
+    recommendations["score_label"] = recommendations["similarity"].map(
+        lambda score: f"{score:.2f}/5 predicted"
+    )
     return recommendations
 
 
@@ -141,6 +241,7 @@ def render_movie_card(row: pd.Series) -> None:
     )
     genres = [genre.strip() for genre in str(row["clean_genres"]).split(",")]
     chips = "".join(genre_chip_html(genre) for genre in genres[:3])
+    score_label = row.get("score_label", f"{row['similarity']}% match")
 
     st.markdown(
         f"""
@@ -153,7 +254,7 @@ def render_movie_card(row: pd.Series) -> None:
                     loading="lazy"
                     onerror="this.onerror=null;this.src='{escape(poster_fallback)}';"
                 >
-                <span class="match-badge">{row['similarity']}% match</span>
+                <span class="match-badge">{escape(str(score_label))}</span>
             </div>
             <div class="movie-name">{escape(str(row['display_title']))}</div>
             <div class="movie-year">{escape(str(row['year']))} · {escape(str(row['primary_genre']))}</div>
@@ -165,9 +266,12 @@ def render_movie_card(row: pd.Series) -> None:
 
 
 movies_df = load_movies()
+ratings_df = load_ratings()
 genre_features_df = build_genre_features(movies_df)
+user_movie_matrix_df = build_user_movie_matrix(ratings_df)
 genre_names = get_genre_names(movies_df)
 sorted_titles = movies_df["title"].sort_values().tolist()
+user_ids = user_movie_matrix_df.index.astype(int).tolist()
 
 st.markdown(
     """
@@ -207,7 +311,8 @@ st.markdown(
 
         [data-testid="stSelectbox"] label,
         [data-testid="stSlider"] label,
-        [data-testid="stMultiSelect"] label {
+        [data-testid="stMultiSelect"] label,
+        [data-testid="stRadio"] label {
             color: #e5e7eb;
             font-weight: 650;
         }
@@ -486,16 +591,25 @@ st.markdown(
             <div class="stat-value">{len(movies_df):,}</div>
         </div>
         <div class="stat-box">
-            <div class="stat-label">Genres</div>
-            <div class="stat-value">{len(genre_names)}</div>
+            <div class="stat-label">Users</div>
+            <div class="stat-value">{len(user_ids):,}</div>
         </div>
         <div class="stat-box">
-            <div class="stat-label">Recommendation Type</div>
-            <div class="stat-value">Similar Movies</div>
+            <div class="stat-label">Ratings</div>
+            <div class="stat-value">{len(ratings_df):,}</div>
         </div>
     </div>
     """,
     unsafe_allow_html=True,
+)
+
+recommendation_mode = st.radio(
+    "Recommendation type",
+    options=[
+        "Content-based: similar genres",
+        "Collaborative: user-based ratings",
+    ],
+    horizontal=True,
 )
 
 st.markdown('<div class="section-title">Browse Genres</div>', unsafe_allow_html=True)
@@ -532,14 +646,6 @@ st.caption(f"Active genre: {st.session_state.active_genre}")
 
 control_left, control_right = st.columns([3, 1])
 
-with control_left:
-    selected_movie = st.selectbox(
-        "Search movie, cinema, genre",
-        options=filtered_titles,
-        index=filtered_titles.index(default_title),
-        help="Start typing to search through the movie titles.",
-    )
-
 with control_right:
     recommendation_count = st.slider(
         "Results",
@@ -549,47 +655,109 @@ with control_right:
         step=1,
     )
 
-selected_row = movies_df.loc[movies_df["title"] == selected_movie].iloc[0]
-selected_imdb_id = (
-    selected_row["imdb_id"] if pd.notna(selected_row["imdb_id"]) else None
-)
-selected_poster, selected_poster_fallback = poster_urls(
-    str(selected_row["display_title"]),
-    str(selected_row["year"]),
-    str(selected_row["primary_genre"]),
-    selected_imdb_id,
-)
-selected_chips = "".join(
-    genre_chip_html(genre.strip()) for genre in str(selected_row["clean_genres"]).split(",")
-)
+if recommendation_mode.startswith("Content-based"):
+    with control_left:
+        selected_movie = st.selectbox(
+            "Search movie, cinema, genre",
+            options=filtered_titles,
+            index=filtered_titles.index(default_title),
+            help="Start typing to search through the movie titles.",
+        )
 
-st.markdown(
-    f"""
-    <div class="selected-panel">
-        <img
-            src="{escape(selected_poster)}"
-            alt="{escape(str(selected_row['display_title']))} poster"
-            loading="lazy"
-            onerror="this.onerror=null;this.src='{escape(selected_poster_fallback)}';"
-        >
-        <div>
-            <div class="selected-title">{escape(str(selected_row["display_title"]))}</div>
-            <div class="selected-meta">{escape(str(selected_row["year"]))} / Movie ID {int(selected_row["movieId"])}</div>
-            <div>{selected_chips}</div>
+    selected_row = movies_df.loc[movies_df["title"] == selected_movie].iloc[0]
+    selected_imdb_id = (
+        selected_row["imdb_id"] if pd.notna(selected_row["imdb_id"]) else None
+    )
+    selected_poster, selected_poster_fallback = poster_urls(
+        str(selected_row["display_title"]),
+        str(selected_row["year"]),
+        str(selected_row["primary_genre"]),
+        selected_imdb_id,
+    )
+    selected_chips = "".join(
+        genre_chip_html(genre.strip())
+        for genre in str(selected_row["clean_genres"]).split(",")
+    )
+
+    st.markdown(
+        f"""
+        <div class="selected-panel">
+            <img
+                src="{escape(selected_poster)}"
+                alt="{escape(str(selected_row['display_title']))} poster"
+                loading="lazy"
+                onerror="this.onerror=null;this.src='{escape(selected_poster_fallback)}';"
+            >
+            <div>
+                <div class="selected-title">{escape(str(selected_row["display_title"]))}</div>
+                <div class="selected-meta">{escape(str(selected_row["year"]))} / Movie ID {int(selected_row["movieId"])}</div>
+                <div>{selected_chips}</div>
+            </div>
         </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+        """,
+        unsafe_allow_html=True,
+    )
 
-recommendations_df = recommend_movies(
-    selected_movie,
-    movies_df,
-    genre_features_df,
-    recommendation_count,
-)
+    recommendations_df = recommend_movies(
+        selected_movie,
+        movies_df,
+        genre_features_df,
+        recommendation_count,
+    )
+else:
+    with control_left:
+        selected_user = st.selectbox(
+            "Choose a user profile",
+            options=user_ids,
+            index=0,
+            format_func=lambda user_id: f"User {user_id}",
+            help="Recommendations are based on users with similar rating histories.",
+        )
+
+    selected_user_ratings = ratings_df[ratings_df["userId"] == selected_user]
+    favorite_movies = (
+        selected_user_ratings.sort_values("rating", ascending=False)
+        .merge(movies_df, on="movieId", how="left")
+        .head(3)
+    )
+    favorite_chips = "".join(
+        genre_chip_html(str(row["display_title"]))
+        for _, row in favorite_movies.iterrows()
+    )
+
+    st.markdown(
+        f"""
+        <div class="selected-panel">
+            <div class="stat-box">
+                <div class="stat-label">Selected User</div>
+                <div class="stat-value">User {int(selected_user)}</div>
+            </div>
+            <div>
+                <div class="selected-title">User-based collaborative filtering</div>
+                <div class="selected-meta">
+                    Built from {len(selected_user_ratings):,} ratings by this user.
+                    The genre filter is applied to unseen movie recommendations.
+                </div>
+                <div>{favorite_chips}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    recommendations_df = recommend_user_based_movies(
+        selected_user,
+        ratings_df,
+        movies_df,
+        user_movie_matrix_df,
+        recommendation_count,
+        st.session_state.active_genre,
+    )
 
 st.markdown('<div class="section-title">Recommended For You</div>', unsafe_allow_html=True)
+
+if recommendations_df.empty:
+    st.info("No recommendations found for this selection. Try another user or genre.")
 
 recommendation_rows = list(recommendations_df.iterrows())
 for start in range(0, len(recommendation_rows), 5):
@@ -599,18 +767,22 @@ for start in range(0, len(recommendation_rows), 5):
             render_movie_card(row)
 
 with st.expander("View recommendations as a table"):
+    score_column_name = (
+        "Similarity %" if recommendation_mode.startswith("Content-based") else "Predicted Rating"
+    )
+    table_df = recommendations_df.drop(columns=["score_label"], errors="ignore").rename(
+        columns={
+            "title": "Movie",
+            "movieId": "Movie ID",
+            "similarity": score_column_name,
+            "display_title": "Title",
+            "year": "Year",
+            "primary_genre": "Main Genre",
+            "clean_genres": "Genres",
+        }
+    )
     st.dataframe(
-        recommendations_df.rename(
-            columns={
-                "title": "Movie",
-                "movieId": "Movie ID",
-                "similarity": "Similarity %",
-                "display_title": "Title",
-                "year": "Year",
-                "primary_genre": "Main Genre",
-                "clean_genres": "Genres",
-            }
-        ),
+        table_df,
         hide_index=True,
         width="stretch",
     )
