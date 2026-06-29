@@ -62,23 +62,24 @@ def load_movies() -> pd.DataFrame:
 
 
 @st.cache_data
-def build_similarity(movies: pd.DataFrame) -> pd.DataFrame:
-    genre_features = movies["genres"].str.get_dummies(sep="|")
-    similarity = cosine_similarity(genre_features)
-    return pd.DataFrame(
-        similarity,
-        index=movies["title"],
-        columns=movies["title"],
-    )
+def build_genre_features(movies: pd.DataFrame) -> pd.DataFrame:
+    return movies["genres"].str.get_dummies(sep="|")
 
 
 def recommend_movies(
     movie_title: str,
     movies: pd.DataFrame,
-    similarity_df: pd.DataFrame,
+    genre_features: pd.DataFrame,
     number_of_movies: int,
 ) -> pd.DataFrame:
-    scores = similarity_df[movie_title].sort_values(ascending=False)
+    movie_index = movies.index[movies["title"] == movie_title][0]
+    similarity_scores = cosine_similarity(
+        genre_features.iloc[[movie_index]],
+        genre_features,
+    ).ravel()
+    scores = pd.Series(similarity_scores, index=movies["title"]).sort_values(
+        ascending=False
+    )
     scores = scores.drop(labels=[movie_title], errors="ignore").head(number_of_movies)
 
     recommendations = (
@@ -164,7 +165,7 @@ def render_movie_card(row: pd.Series) -> None:
 
 
 movies_df = load_movies()
-movie_similarity_df = build_similarity(movies_df)
+genre_features_df = build_genre_features(movies_df)
 genre_names = get_genre_names(movies_df)
 sorted_titles = movies_df["title"].sort_values().tolist()
 
@@ -584,7 +585,7 @@ st.markdown(
 recommendations_df = recommend_movies(
     selected_movie,
     movies_df,
-    movie_similarity_df,
+    genre_features_df,
     recommendation_count,
 )
 
