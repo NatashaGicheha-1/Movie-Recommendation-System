@@ -200,3 +200,35 @@ Unnecessary columns like title and genres are dropped after feature extraction t
 |------|------|--------|
 | Content-Based | Similarity | Recommend similar movies |
 | Collaborative | User-based | Recommend based on users |
+
+## Access and Local Usage
+
+### Access the Deployed App
+You can use the movie recommendation system online here:
+
+https://movierecommendationsystemgit-gqwg73ifsffnfr7bke3rxo.streamlit.app/
+
+### Run the App Locally
+To run the system on your own machine:
+
+1. Clone or download this project.
+2. Open a terminal in the project folder.
+3. Install the required dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+4. Start the Streamlit app:
+
+```bash
+streamlit run app.py
+```
+
+5. Open the local URL shown in the terminal, usually:
+
+```text
+http://localhost:8501
+```
+
+In the app, choose between content-based recommendations by movie/genre or collaborative recommendations based on user rating histories.
