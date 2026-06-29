@@ -571,11 +571,11 @@ st.markdown(
     """
     <section class="hero">
         <div>
-            <div class="hero-kicker">Content-based recommender</div>
-            <div class="hero-title">Find your next movie by mood and genre.</div>
+            <div class="hero-kicker">Hybrid movie recommender</div>
+            <div class="hero-title">Find your next movie by genre or user ratings.</div>
             <div class="hero-copy">
-                Search for a movie you already like, explore the genres in the MovieLens dataset,
-                and get similar recommendations in a visual movie-browsing layout.
+                Search for a movie you already like for content-based suggestions, or choose
+                a user profile to get collaborative recommendations from similar rating histories.
             </div>
         </div>
     </section>
